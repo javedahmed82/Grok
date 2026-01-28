@@ -1,2 +1,3 @@
 grokipedia-api
 python-telegram-bot==21.6
+requests
