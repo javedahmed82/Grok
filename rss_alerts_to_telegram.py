@@ -252,7 +252,7 @@ async def send_alert(bot: Bot, text: str, url: str | None, tag: str):
         rows.append([InlineKeyboardButton("🔗 Open Source", url=url)])
 
     if tag == "CRYPTO":
-        rows.append([InlineKeyboardButton("🧹 Revoke Approvals (revoke.cash)", url="https://revoke.cash/")])
+        rows.append([InlineKeyboardButton("🧹 Revoke Approvals", url="https://revoke.cash/")])
 
     markup = InlineKeyboardMarkup(rows) if rows else None
 
