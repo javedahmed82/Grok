@@ -23,33 +23,33 @@ RAW_QUERIES = os.getenv("GROKIPEDIA_QUERIES", "").strip()
 if RAW_QUERIES:
     QUERIES = [q.strip() for q in RAW_QUERIES.split(",") if q.strip()]
 else:
-    # safer defaults than "crypto"
     QUERIES = ["bitcoin", "ethereum", "defi", "altcoin", "token", "blockchain", "web3", "binance"]
 
 RESULTS_PER_QUERY = int(os.getenv("RESULTS_PER_QUERY", "3"))
 MEMORY_FILE = os.getenv("MEMORY_FILE", "posted_memory.json")
 
-# Telegram hard limit: 4096 chars
+# Telegram limits
 TG_MAX = 4096
+PHOTO_CAPTION_MAX = 900  # keep safely under 1024
 
-# How many posts max per run (to avoid flooding)
+# Avoid flooding per action run
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "6"))
 
-# AI Summary toggle (optional)
+# AI Summary (optional)
 AI_ENABLED = os.getenv("AI_ENABLED", "0").strip() == "1"
 AI_PROVIDER = os.getenv("AI_PROVIDER", "none").strip().lower()  # "none" | "openai_compatible"
-AI_API_URL = os.getenv("AI_API_URL", "").strip()  # e.g. https://api.openai.com/v1/chat/completions or any compatible
+AI_API_URL = os.getenv("AI_API_URL", "").strip()
 AI_API_KEY = os.getenv("AI_API_KEY", "").strip()
-AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini").strip()  # any compatible model name
+AI_MODEL = os.getenv("AI_MODEL", "gpt-4o-mini").strip()
 AI_TIMEOUT = int(os.getenv("AI_TIMEOUT", "25"))
 
 # Breaking threshold
 BREAKING_SCORE_THRESHOLD = int(os.getenv("BREAKING_SCORE_THRESHOLD", "75"))
 
-# Keep sources count
+# Sources count
 MAX_SOURCES = int(os.getenv("MAX_SOURCES", "3"))
 
-# Hashtags (edit as you like)
+# Hashtags
 DEFAULT_HASHTAGS = os.getenv(
     "HASHTAGS",
     "#Crypto #Bitcoin #Ethereum #Altcoins #Blockchain #DeFi #Web3"
@@ -57,7 +57,7 @@ DEFAULT_HASHTAGS = os.getenv(
 
 
 # -----------------------------
-# FILTERS (avoid off-topic)
+# FILTERS / HEURISTICS
 # -----------------------------
 OFFTOPIC_KEYWORDS = {
     "religion", "islam", "judaism", "christian", "moriscos", "granada", "inquisition",
@@ -70,14 +70,14 @@ CRYPTO_CONTEXT_KEYWORDS = {
 }
 
 RISK_KEYWORDS = {
-    "scam", "rug pull", "rugpull", "ponzi", "fraud", "hack", "exploit", "drained",
+    "scam", "rug pull", "rugpull", "ponzi", "fraud", "hack", "exploited", "exploit", "drained",
     "phishing", "malware", "laundering", "indictment", "charged", "sec", "lawsuit",
-    "sanction", "shutdown", "exit scam", "frozen", "seized", "arrested"
+    "sanction", "shutdown", "exit scam", "frozen", "seized", "arrested", "bankrupt"
 }
 
 BREAKING_KEYWORDS = {
-    "breaking", "urgent", "just in", "alert", "hacked", "exploit", "sec", "approved",
-    "etf", "lawsuit", "charges", "indictment", "massive", "surge", "plunge", "halted"
+    "breaking", "urgent", "just in", "alert", "hacked", "hack", "exploit", "sec", "approved",
+    "etf", "lawsuit", "charges", "indictment", "massive", "surge", "plunge", "halted", "bankrupt"
 }
 
 
@@ -116,9 +116,9 @@ def strip_markup(text: str) -> str:
     """
     t = text or ""
     t = re.sub(r"<!--.*?-->", "", t, flags=re.DOTALL)
-    t = re.sub(r"\[([^\]]+)\]\(/page/[^\)]+\)", r"\1", t)          # internal links
-    t = re.sub(r"\(/page/[^\)]+\)", "", t)                        # leftovers
-    t = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r"\1", t)    # external markdown links
+    t = re.sub(r"\[([^\]]+)\]\(/page/[^\)]+\)", r"\1", t)
+    t = re.sub(r"\(/page/[^\)]+\)", "", t)
+    t = re.sub(r"\[([^\]]+)\]\((https?://[^\)]+)\)", r"\1", t)
     return normalize_ws(t)
 
 def split_sentences(text: str):
@@ -136,25 +136,23 @@ def clamp(s: str, n: int) -> str:
 
 
 # -----------------------------
-# OFFTOPIC / CRYPTO RELEVANCE
+# TOPIC FILTER
 # -----------------------------
 def is_offtopic(title: str, content: str) -> bool:
     blob = (title + " " + content).lower()
     if any(k in blob for k in OFFTOPIC_KEYWORDS):
-        # only treat off-topic if crypto context is weak
         if sum(1 for k in CRYPTO_CONTEXT_KEYWORDS if k in blob) < 2:
             return True
     return False
 
 
 # -----------------------------
-# RISK TAG + IMPACT SCORE + BREAKING
+# RISK / IMPACT / BREAKING
 # -----------------------------
 def risk_detect(title: str, content: str):
     blob = (title + " " + content).lower()
     hits = [k for k in RISK_KEYWORDS if k in blob]
     if hits:
-        # pick top 3 keywords for display
         uniq = []
         for h in hits:
             if h not in uniq:
@@ -165,22 +163,18 @@ def risk_detect(title: str, content: str):
     return False, []
 
 def impact_score(title: str, content: str, sources_count: int) -> int:
-    """
-    Heuristic score 0..100 based on "market-moving" terms + risk + major events.
-    """
     blob = (title + " " + content).lower()
     score = 10
 
-    # positive movers
     positives = {
         "etf": 25, "approved": 18, "approval": 18, "partnership": 10, "listing": 12,
         "launch": 10, "upgrade": 10, "mainnet": 12, "adoption": 10, "record high": 18,
         "surge": 12
     }
-    # negative movers
     negatives = {
-        "hack": 25, "exploit": 25, "sec": 22, "lawsuit": 15, "charges": 18,
-        "indictment": 18, "arrested": 18, "plunge": 14, "halted": 16, "bankrupt": 22
+        "hack": 25, "hacked": 25, "exploit": 25, "sec": 22, "lawsuit": 15, "charges": 18,
+        "indictment": 18, "arrested": 18, "plunge": 14, "halted": 16, "bankrupt": 22,
+        "frozen": 15, "seized": 18, "shutdown": 18
     }
 
     for k, w in positives.items():
@@ -194,10 +188,7 @@ def impact_score(title: str, content: str, sources_count: int) -> int:
     if risky:
         score += 18
 
-    # more sources => more credible => slightly higher impact
     score += min(10, max(0, sources_count - 1) * 3)
-
-    # cap
     return max(0, min(100, score))
 
 def is_breaking(title: str, content: str, score: int) -> bool:
@@ -212,11 +203,18 @@ def is_breaking(title: str, content: str, score: int) -> bool:
 # -----------------------------
 # AI SUMMARY (OPTIONAL)
 # -----------------------------
+def heuristic_short_summary(cleaned: str) -> str:
+    sents = split_sentences(cleaned)
+    if not sents:
+        return ""
+    s1 = sents[0]
+    s2 = sents[1] if len(sents) > 1 else ""
+    out = s1
+    if s2 and len(out) < 140:
+        out = out + " " + s2
+    return clamp(out, 240)
+
 def ai_summarize_short(title: str, content: str) -> str:
-    """
-    Returns a short AI summary (2-3 lines).
-    If AI disabled or not configured, fallback to heuristic summary.
-    """
     cleaned = strip_markup(content)
     fallback = heuristic_short_summary(cleaned)
 
@@ -263,28 +261,12 @@ def ai_summarize_short(title: str, content: str) -> str:
     return fallback
 
 
-def heuristic_short_summary(cleaned: str) -> str:
-    sents = split_sentences(cleaned)
-    if not sents:
-        return ""
-    # Pick 1-2 best first lines
-    s1 = sents[0]
-    s2 = sents[1] if len(sents) > 1 else ""
-    out = s1
-    if s2 and len(out) < 140:
-        out = out + " " + s2
-    return clamp(out, 240)
-
-
 # -----------------------------
-# LONG NEWS BODY (WITH EMOJIS)
+# LONG NEWS BODY
 # -----------------------------
 def build_news_sections(content: str):
     cleaned = strip_markup(content)
-    sents = split_sentences(cleaned)
-
-    # Keep only meaningful sentences
-    sents = [s for s in sents if len(s) >= 35]
+    sents = [s for s in split_sentences(cleaned) if len(s) >= 35]
 
     if not sents:
         return "", [], ""
@@ -293,7 +275,6 @@ def build_news_sections(content: str):
     highlights = sents[3:10]
     why = " ".join(sents[10:13]) if len(sents) > 10 else (" ".join(sents[6:8]) if len(sents) > 6 else "")
 
-    # bullet tightening
     bullets = []
     for s in highlights:
         s = normalize_ws(s)
@@ -312,11 +293,6 @@ def build_news_sections(content: str):
 # IMAGE PICK
 # -----------------------------
 def pick_image_url(citations):
-    """
-    Prefer major publishers for rich preview (Telegram will fetch preview).
-    If direct image isn't available, we use a good source URL and send as photo,
-    Telegram still shows preview.
-    """
     if not citations:
         return None
     preferred_domains = [
@@ -328,12 +304,11 @@ def pick_image_url(citations):
         u = (c.get("url") or "").strip()
         if any(d in u for d in preferred_domains):
             return u
-    # fallback first source URL
     return (citations[0].get("url") or "").strip() or None
 
 
 # -----------------------------
-# FORMAT TELEGRAM POST (LONG + AI SHORT)
+# FORMAT LONG POST
 # -----------------------------
 def format_post(title: str, slug: str, content: str, citations: list, topic: str) -> str:
     url = f"https://grokipedia.com/{slug}"
@@ -345,27 +320,16 @@ def format_post(title: str, slug: str, content: str, citations: list, topic: str
     score = impact_score(title, content, sources_count=len(citations or []))
     breaking = is_breaking(title, content, score)
 
-    # AI short summary (or fallback)
     short_ai = ai_summarize_short(title, content)
 
-    # Escape for HTML parse mode
-    title_h = safe_html(title)
-    topic_h = safe_html(topic)
-
-    what_h = safe_html(what)
-    bullets_h = [safe_html(b) for b in bullets]
-    why_h = safe_html(why)
-    short_ai_h = safe_html(short_ai)
-
     badge = "🚨 <b>BREAKING</b>" if breaking else "📰 <b>NEWS UPDATE</b>"
+    impact_bar = "🟢" if score < 40 else ("🟡" if score < 70 else "🔴")
+
     risk_line = ""
     if risky:
         tags = ", ".join([safe_html(x) for x in risk_hits])
         risk_line = f"\n🚫 <b>Risk Alert:</b> <i>{tags}</i>"
 
-    impact_bar = "🟢" if score < 40 else ("🟡" if score < 70 else "🔴")
-
-    # Sources block
     sources_block = ""
     if citations:
         rows = []
@@ -379,17 +343,17 @@ def format_post(title: str, slug: str, content: str, citations: list, topic: str
 
     msg = (
         f"{badge}\n"
-        f"🧠 <b>{title_h}</b>\n"
-        f"🔎 <i>Topic:</i> {topic_h}{risk_line}\n\n"
+        f"🧠 <b>{safe_html(title)}</b>\n"
+        f"🔎 <i>Topic:</i> {safe_html(topic)}{risk_line}\n\n"
         f"🧠 <b>AI Quick Summary</b>\n"
-        f"{short_ai_h}\n\n"
+        f"{safe_html(short_ai)}\n\n"
         f"🧩 <b>What happened?</b>\n"
-        f"{what_h}\n\n"
+        f"{safe_html(what)}\n\n"
         f"📌 <b>Key Highlights</b>\n"
-        + "\n".join([f"• {b}" for b in bullets_h[:6]])
+        + "\n".join([f"• {safe_html(b)}" for b in bullets[:6]])
         + "\n\n"
         f"⚠️ <b>Why it matters</b>\n"
-        f"{why_h if why_h else safe_html('This could affect sentiment, liquidity, and market confidence—keep an eye on updates.')}\n\n"
+        f"{safe_html(why) if why else safe_html('This could affect sentiment, liquidity, and market confidence—keep an eye on updates.')}\n\n"
         f"📊 <b>Market Impact Score:</b> {impact_bar} <b>{score}/100</b>\n\n"
         f"🔗 <b>Read full article</b>\n"
         f"<a href='{safe_html(url)}'>{safe_html(url)}</a>"
@@ -398,42 +362,69 @@ def format_post(title: str, slug: str, content: str, citations: list, topic: str
         f"{safe_html(DEFAULT_HASHTAGS)}"
     )
 
-    # Keep safe under Telegram limit
-    msg = clamp(msg, 3900)
-    return msg
+    return clamp(msg, 3900)
 
 
 # -----------------------------
-# SAFE SEND (HTML + FALLBACK)
+# PHOTO CAPTION SPLIT (FIX)
+# -----------------------------
+def split_for_photo_and_text(full_html: str) -> tuple[str, str]:
+    if not full_html:
+        return "", ""
+    if len(full_html) <= PHOTO_CAPTION_MAX:
+        return full_html, ""
+
+    caption = full_html[:PHOTO_CAPTION_MAX]
+    cut = max(caption.rfind("\n"), caption.rfind(" "))
+    if cut > 200:
+        caption = caption[:cut]
+    caption = caption.strip() + "…"
+    return caption, full_html
+
+
+# -----------------------------
+# SAFE SEND (PHOTO + LONG MESSAGE)
 # -----------------------------
 async def safe_send(bot: Bot, text: str, image_url: str | None):
-    """
-    Try photo with caption (best news feel). If fails, fallback to message.
-    If HTML fails, fallback to plain text.
-    """
+    caption_html, long_html = split_for_photo_and_text(text)
+
     try:
         if image_url:
+            # 1) Photo with short caption
             await bot.send_photo(
                 chat_id=CHAT_ID,
                 photo=image_url,
-                caption=text,
-                parse_mode="HTML"
+                caption=caption_html,
+                parse_mode="HTML",
             )
+            # 2) Full long post as separate message
+            if long_html:
+                await bot.send_message(
+                    chat_id=CHAT_ID,
+                    text=clamp(long_html, TG_MAX),
+                    parse_mode="HTML",
+                    disable_web_page_preview=False
+                )
         else:
             await bot.send_message(
                 chat_id=CHAT_ID,
-                text=text,
+                text=clamp(text, TG_MAX),
                 parse_mode="HTML",
                 disable_web_page_preview=False
             )
         return
+
     except BadRequest:
-        # fallback: plain text (strip basic tags)
+        # fallback plain text
         plain = normalize_ws(text)
-        plain = re.sub(r"<[^>]+>", "", plain)  # remove html tags
+        plain = re.sub(r"<[^>]+>", "", plain)
         plain = clamp(plain, TG_MAX)
+
         if image_url:
-            await bot.send_photo(chat_id=CHAT_ID, photo=image_url, caption=plain)
+            cap_plain = clamp(plain, PHOTO_CAPTION_MAX)
+            await bot.send_photo(chat_id=CHAT_ID, photo=image_url, caption=cap_plain)
+            if len(plain) > PHOTO_CAPTION_MAX:
+                await bot.send_message(chat_id=CHAT_ID, text=plain, disable_web_page_preview=False)
         else:
             await bot.send_message(chat_id=CHAT_ID, text=plain, disable_web_page_preview=False)
 
@@ -469,7 +460,6 @@ async def run_cycle():
             if not slug:
                 continue
 
-            # stronger dedupe: include slug + title
             key = uid(f"{slug}|{title}")
             if key in memory:
                 continue
@@ -479,7 +469,6 @@ async def run_cycle():
             content = p.get("content", "") or ""
             citations = p.get("citations", []) or []
 
-            # Off-topic filter
             if is_offtopic(title or "", content or ""):
                 memory.add(key)
                 save_memory(memory)
