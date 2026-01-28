@@ -6,8 +6,8 @@ import hashlib
 import argparse
 import asyncio
 from datetime import datetime, timezone
-from html import escape as html_escape
 from html import unescape as html_unescape
+from html import escape as html_escape
 
 import feedparser
 from telegram import Bot
@@ -26,7 +26,7 @@ DISABLE_WEB_PREVIEW = True
 
 
 # =========================
-# RSS FEEDS (UNLIMITED)
+# RSS FEEDS
 # =========================
 RSS_FEEDS = [
     ("CertiK", "https://www.certik.com/resources/blog/feed"),
@@ -38,18 +38,18 @@ RSS_FEEDS = [
 
 
 # =========================
-# ALERT KEYWORDS (strong)
+# ALERT KEYWORDS (strong signals)
 # =========================
 STRONG_ALERT_KEYWORDS = [
     "wallet drainer", "drainer", "phishing", "fake website", "fake site",
-    "exploit", "hacked", "hack", "exploited",
+    "exploit", "exploited", "hacked", "hack",
     "rugpull", "rug pull", "exit scam", "honeypot",
     "funds drained", "stolen", "drained",
     "withdrawals halted", "funds frozen",
     "bridge hack", "compromised", "private key leaked",
 ]
 
-# Words that usually indicate “report/analysis” not a breaking alert
+# Words that often mean “report/analysis” rather than a breaking incident
 SOFT_REPORT_WORDS = [
     "annual report", "q4", "report", "analysis", "overview", "whitepaper",
     "study", "research", "statistics", "recap", "year in review"
@@ -74,29 +74,31 @@ def load_memory() -> set:
 
 
 def save_memory(mem: set):
+    # keep last 10k ids (enough)
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(mem))[-10000:], f, indent=2)
 
 
 # =========================
-# CLEANING (fix Medium HTML junk)
+# CLEANING (removes Medium HTML junk)
 # =========================
 TAG_RE = re.compile(r"<[^>]+>")
 URL_RE = re.compile(r"https?://\S+")
 WHITESPACE_RE = re.compile(r"\s+")
 
+
 def strip_html(raw: str) -> str:
     raw = raw or ""
     raw = html_unescape(raw)
 
-    # Remove common Medium embeds/figures quickly
+    # Remove common Medium embeds/figures/images
     raw = re.sub(r"<figure.*?>.*?</figure>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
     raw = re.sub(r"<img.*?>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
 
     # Remove remaining tags
     raw = TAG_RE.sub(" ", raw)
 
-    # Remove URLs inside context to avoid “bnb” in links triggering network
+    # Remove URLs from context (prevents network false triggers from links)
     raw = URL_RE.sub(" ", raw)
 
     # Normalize whitespace
@@ -111,7 +113,6 @@ def normalize(text: str) -> str:
 def strong_hits(text: str) -> list:
     low = (text or "").lower()
     hits = [k for k in STRONG_ALERT_KEYWORDS if k in low]
-    # de-dup keep order
     out = []
     for h in hits:
         if h not in out:
@@ -127,12 +128,11 @@ def is_soft_report(title: str, summary: str) -> bool:
 
 
 # =========================
-# NETWORK DETECTION (word boundary, no URL influence)
+# NETWORK DETECTION (word boundary based)
 # =========================
 def detect_network(clean_text: str) -> str:
     t = (clean_text or "").lower()
 
-    # word boundaries avoid “bnb” in random strings
     if re.search(r"\b(bsc|bnb chain|bnb smart chain)\b", t):
         return "BNB (BSC)"
     if re.search(r"\b(ethereum|eth|erc20|erc-20)\b", t):
@@ -173,30 +173,56 @@ def impact_and_action(kind: str) -> tuple[str, str]:
 
 
 def risk_and_todo(kind: str):
+    # PURE ENGLISH (as requested)
     if kind == "drainer":
         return (
-            ["Fake sites wallet drain kar sakti hain", "Malicious signatures capture ho sakte hain"],
-            ["Unknown transaction SIGN mat karo", "Token approvals revoke karo", "Unknown links avoid karo"],
+            [
+                "Fake websites may drain wallets",
+                "Malicious signatures can capture approvals",
+                "Unauthorized transactions may be triggered",
+            ],
+            [
+                "Do NOT sign unknown transactions",
+                "Revoke suspicious token approvals",
+                "Avoid untrusted links and dApps",
+                "Disconnect your wallet from unknown sites",
+            ],
         )
+
     if kind == "hack":
         return (
-            ["Exploit/Hack detect hua — funds risk me ho sakte hain", "Protocol/contract interaction unsafe ho sakta hai"],
-            ["Protocol se interact mat karo", "Agar funds hain to withdraw try karo (if possible)", "Official updates follow karo"],
+            [
+                "Exploit/Hack indicators detected — funds may be at risk",
+                "Interacting with the affected protocol/contract may be unsafe",
+            ],
+            [
+                "Do NOT interact with the affected protocol",
+                "Follow official security updates only",
+                "Move funds to safety if you are exposed (when possible)",
+            ],
         )
+
     if kind == "scam":
         return (
-            ["Scam/Rug signals — liquidity drain ya honeypot ka risk", "Funds loss possible"],
-            ["Token trade avoid karo", "Wallet approvals check & revoke karo", "Sirf verified sources follow karo"],
+            [
+                "Scam/Rug signals detected — high probability of fund loss",
+                "Liquidity drain or honeypot behavior is possible",
+            ],
+            [
+                "Avoid trading/interacting with the token",
+                "Check and revoke wallet approvals",
+                "Use only verified official links",
+            ],
         )
 
     return (
         ["Suspicious activity detected", "Stay cautious"],
-        ["Unknown links/tx avoid karo", "Official updates follow karo"],
+        ["Avoid unknown links/transactions", "Follow official updates"],
     )
 
 
 # =========================
-# FORMAT MESSAGE (clean + readable)
+# FORMAT MESSAGE (Telegram HTML)
 # =========================
 def format_alert(source: str, title: str, summary: str, link: str) -> str:
     title = normalize(title)[:120]
@@ -209,7 +235,6 @@ def format_alert(source: str, title: str, summary: str, link: str) -> str:
     impact, action = impact_and_action(kind)
     risk, todo = risk_and_todo(kind)
 
-    # short context only (no html, no urls)
     context = clean_summary
     if len(context) > 380:
         context = context[:380].rstrip() + "…"
@@ -220,12 +245,12 @@ def format_alert(source: str, title: str, summary: str, link: str) -> str:
         f"🚨 <b>ALERT</b>\n"
         f"🧾 <b>Title:</b> {html_escape(title)}\n"
         f"🏷️ <b>Network:</b> {html_escape(network)}\n\n"
-        f"⚠️ <b>Risk</b>\n" +
-        "\n".join([f"• {html_escape(x)}" for x in risk]) +
-        "\n\n"
-        f"🧠 <b>What to do NOW</b>\n" +
-        "\n".join([f"• {html_escape(x)}" for x in todo]) +
-        "\n\n"
+        f"⚠️ <b>Risk</b>\n"
+        + "\n".join([f"• {html_escape(x)}" for x in risk])
+        + "\n\n"
+        f"🧠 <b>What to do NOW</b>\n"
+        + "\n".join([f"• {html_escape(x)}" for x in todo])
+        + "\n\n"
         f"📊 <b>Impact:</b> {impact}\n"
         f"🔥 <b>Action:</b> {html_escape(action)}\n\n"
         f"🧩 <b>Context</b>\n{html_escape(context)}\n\n"
@@ -234,11 +259,12 @@ def format_alert(source: str, title: str, summary: str, link: str) -> str:
         f"🕒 <i>{now}</i>"
     )
 
+    # Telegram safe limit (messages)
     return msg[:3800]
 
 
 # =========================
-# SEND (ASYNC)
+# SEND (ASYNC SAFE)
 # =========================
 async def send(bot: Bot, msg: str):
     try:
@@ -249,7 +275,6 @@ async def send(bot: Bot, msg: str):
             disable_web_page_preview=DISABLE_WEB_PREVIEW,
         )
     except BadRequest:
-        # fallback plain
         plain = re.sub(r"<[^>]+>", "", msg)
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -272,7 +297,6 @@ async def run_once():
     for source, url in RSS_FEEDS:
         feed = feedparser.parse(url)
 
-        # newest-first in many feeds; keep as is but stop early via MAX_POSTS_PER_RUN
         for entry in feed.entries:
             if posted >= MAX_POSTS_PER_RUN:
                 break
@@ -288,7 +312,7 @@ async def run_once():
             if not hits:
                 continue
 
-            # Reduce spam from “reports/analysis” unless it still has strong keywords
+            # Reduce report spam unless it's strongly alerting
             if is_soft_report(title, clean_summary) and len(hits) < 2:
                 continue
 
