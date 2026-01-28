@@ -1,2 +1,4 @@
 python-telegram-bot==21.6
-feedparser
+feedparser==6.0.11
+httpx==0.27.2
+beautifulsoup4==4.12.3
