@@ -1,0 +1,20 @@
+- name: Download memory (if exists)
+  uses: actions/download-artifact@v4
+  with:
+    name: posted-memory
+    path: .
+  continue-on-error: true
+
+- name: Run RSS bot
+  run: python rss_alerts_to_telegram.py --once
+  env:
+    TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+    TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    MEMORY_FILE: posted_memory.json
+    MAX_POSTS_PER_RUN: 5
+
+- name: Upload memory
+  uses: actions/upload-artifact@v4
+  with:
+    name: posted-memory
+    path: posted_memory.json
