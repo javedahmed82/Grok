@@ -3,6 +3,7 @@ import json
 import time
 import hashlib
 import argparse
+import asyncio
 from datetime import datetime
 
 from telegram import Bot
@@ -10,9 +11,10 @@ from grokipedia_api import GrokipediaClient
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
-QUERIES = [q.strip() for q in os.getenv("GROKIPEDIA_QUERIES", "bitcoin,BNB,PancakeSwap").split(",")]
+QUERIES = [q.strip() for q in os.getenv("GROKIPEDIA_QUERIES", "bitcoin,BNB,PancakeSwap").split(",") if q.strip()]
 RESULTS_PER_QUERY = int(os.getenv("RESULTS_PER_QUERY", "3"))
 MEMORY_FILE = os.getenv("MEMORY_FILE", "posted_memory.json")
+
 
 def load_memory():
     if os.path.exists(MEMORY_FILE):
@@ -23,16 +25,20 @@ def load_memory():
             return set()
     return set()
 
+
 def save_memory(mem):
     with open(MEMORY_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(mem))[-5000:], f, indent=2, ensure_ascii=False)
 
+
 def uid(text):
     return hashlib.sha256(text.encode()).hexdigest()[:24]
+
 
 def clean(text, limit=900):
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[:limit] + "…"
+
 
 def format_post(title, slug, summary, citations, topic):
     url = f"https://grokipedia.com/{slug}"
@@ -40,12 +46,12 @@ def format_post(title, slug, summary, citations, topic):
 
     src = ""
     if citations:
-        srcs = []
+        rows = []
         for c in citations[:2]:
             if c.get("title") and c.get("url"):
-                srcs.append(f"• <a href='{c['url']}'>{c['title']}</a>")
-        if srcs:
-            src = "\n\n<b>Sources</b>\n" + "\n".join(srcs)
+                rows.append(f"• <a href='{c['url']}'>{c['title']}</a>")
+        if rows:
+            src = "\n\n<b>Sources</b>\n" + "\n".join(rows)
 
     return (
         f"🧠 <b>{title}</b>\n"
@@ -56,7 +62,8 @@ def format_post(title, slug, summary, citations, topic):
         f"{src}"
     )
 
-def run_cycle():
+
+async def run_cycle():
     if not BOT_TOKEN or not CHAT_ID:
         raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
 
@@ -65,10 +72,11 @@ def run_cycle():
     memory = load_memory()
 
     for topic in QUERIES:
-        res = client.search(topic, limit=RESULTS_PER_QUERY)
-        for r in res.get("results", []):
-            slug = r.get("slug")
-            title = r.get("title") or slug
+        results = client.search(topic, limit=RESULTS_PER_QUERY)
+
+        for item in results.get("results", []):
+            slug = item.get("slug")
+            title = item.get("title") or slug
             if not slug:
                 continue
 
@@ -81,23 +89,25 @@ def run_cycle():
             content = p.get("content", "")
             citations = p.get("citations", [])
 
-            msg = format_post(title, slug, content, citations, topic)
+            message = format_post(title, slug, content, citations, topic)
 
-            bot.send_message(
+            await bot.send_message(
                 chat_id=CHAT_ID,
-                text=msg,
+                text=message,
                 parse_mode="HTML",
                 disable_web_page_preview=False
             )
 
             memory.add(key)
             save_memory(memory)
-            time.sleep(3)
+            await asyncio.sleep(3)
 
-def main_loop():
+
+async def main_loop():
     while True:
-        run_cycle()
-        time.sleep(1800)
+        await run_cycle()
+        await asyncio.sleep(1800)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -105,6 +115,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.once:
-        run_cycle()
+        asyncio.run(run_cycle())
     else:
-        main_loop()
+        asyncio.run(main_loop())
