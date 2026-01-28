@@ -7,6 +7,7 @@ import argparse
 import asyncio
 from datetime import datetime, timezone
 from html import escape as html_escape
+from html import unescape as html_unescape
 
 import feedparser
 from telegram import Bot
@@ -37,15 +38,21 @@ RSS_FEEDS = [
 
 
 # =========================
-# ALERT KEYWORDS
+# ALERT KEYWORDS (strong)
 # =========================
-ALERT_KEYWORDS = [
-    "hack", "hacked", "exploit", "exploited",
-    "wallet drainer", "drainer",
-    "phishing", "fake site", "scam",
-    "rug", "rug pull", "rugpull",
-    "funds drained", "funds frozen",
-    "withdrawals halted", "bridge hack",
+STRONG_ALERT_KEYWORDS = [
+    "wallet drainer", "drainer", "phishing", "fake website", "fake site",
+    "exploit", "hacked", "hack", "exploited",
+    "rugpull", "rug pull", "exit scam", "honeypot",
+    "funds drained", "stolen", "drained",
+    "withdrawals halted", "funds frozen",
+    "bridge hack", "compromised", "private key leaked",
+]
+
+# Words that usually indicate “report/analysis” not a breaking alert
+SOFT_REPORT_WORDS = [
+    "annual report", "q4", "report", "analysis", "overview", "whitepaper",
+    "study", "research", "statistics", "recap", "year in review"
 ]
 
 
@@ -72,97 +79,158 @@ def save_memory(mem: set):
 
 
 # =========================
-# HELPERS
+# CLEANING (fix Medium HTML junk)
 # =========================
+TAG_RE = re.compile(r"<[^>]+>")
+URL_RE = re.compile(r"https?://\S+")
+WHITESPACE_RE = re.compile(r"\s+")
+
+def strip_html(raw: str) -> str:
+    raw = raw or ""
+    raw = html_unescape(raw)
+
+    # Remove common Medium embeds/figures quickly
+    raw = re.sub(r"<figure.*?>.*?</figure>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    raw = re.sub(r"<img.*?>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+
+    # Remove remaining tags
+    raw = TAG_RE.sub(" ", raw)
+
+    # Remove URLs inside context to avoid “bnb” in links triggering network
+    raw = URL_RE.sub(" ", raw)
+
+    # Normalize whitespace
+    raw = WHITESPACE_RE.sub(" ", raw).strip()
+    return raw
+
+
 def normalize(text: str) -> str:
-    return " ".join((text or "").split())
+    return WHITESPACE_RE.sub(" ", (text or "")).strip()
 
 
-def detect_alert(text: str) -> list:
-    low = text.lower()
-    hits = [k for k in ALERT_KEYWORDS if k in low]
-    return list(dict.fromkeys(hits))
+def strong_hits(text: str) -> list:
+    low = (text or "").lower()
+    hits = [k for k in STRONG_ALERT_KEYWORDS if k in low]
+    # de-dup keep order
+    out = []
+    for h in hits:
+        if h not in out:
+            out.append(h)
+        if len(out) >= 4:
+            break
+    return out
 
 
-def detect_network(text: str) -> str:
-    low = text.lower()
-    if "bnb" in low or "bsc" in low:
+def is_soft_report(title: str, summary: str) -> bool:
+    low = f"{title} {summary}".lower()
+    return any(w in low for w in SOFT_REPORT_WORDS)
+
+
+# =========================
+# NETWORK DETECTION (word boundary, no URL influence)
+# =========================
+def detect_network(clean_text: str) -> str:
+    t = (clean_text or "").lower()
+
+    # word boundaries avoid “bnb” in random strings
+    if re.search(r"\b(bsc|bnb chain|bnb smart chain)\b", t):
         return "BNB (BSC)"
-    if "ethereum" in low or "eth" in low:
+    if re.search(r"\b(ethereum|eth|erc20|erc-20)\b", t):
         return "Ethereum"
-    if "solana" in low:
+    if re.search(r"\b(solana|sol)\b", t):
         return "Solana"
-    if "polygon" in low:
+    if re.search(r"\b(bitcoin|btc)\b", t):
+        return "Bitcoin"
+    if re.search(r"\b(polygon|matic)\b", t):
         return "Polygon"
-    if "arbitrum" in low:
+    if re.search(r"\b(arbitrum|arb)\b", t):
         return "Arbitrum"
+    if re.search(r"\b(optimism|op)\b", t):
+        return "Optimism"
+    if re.search(r"\b(avalanche|avax)\b", t):
+        return "Avalanche"
+
     return "Crypto / DeFi"
 
 
-def impact_and_action(hits):
-    if any(h in hits for h in ["hack", "exploit", "bridge hack", "funds drained"]):
-        return "🔴 VERY HIGH", "EXIT / AVOID"
-    if any(h in hits for h in ["wallet drainer", "phishing", "scam", "rug"]):
+def classify(hits: list[str]) -> str:
+    low = " ".join(hits)
+    if any(x in low for x in ["drainer", "phishing", "fake website", "fake site"]):
+        return "drainer"
+    if any(x in low for x in ["exploit", "hacked", "hack", "drained", "bridge hack", "compromised"]):
+        return "hack"
+    if any(x in low for x in ["rugpull", "rug pull", "exit scam", "honeypot"]):
+        return "scam"
+    return "alert"
+
+
+def impact_and_action(kind: str) -> tuple[str, str]:
+    if kind == "hack":
+        return "🔴🔴 VERY HIGH", "EXIT / AVOID"
+    if kind in ("drainer", "scam"):
         return "🔴 HIGH", "STAY AWAY"
     return "🟡 MEDIUM", "CAUTION"
 
 
-def risk_and_todo(hits):
-    if "wallet drainer" in hits or "phishing" in hits:
+def risk_and_todo(kind: str):
+    if kind == "drainer":
         return (
-            [
-                "Fake websites wallets drain kar rahi hain",
-                "Malicious signatures capture ho sakte hain",
-            ],
-            [
-                "Unknown transaction SIGN mat karo",
-                "Token approvals revoke karo",
-                "Unknown links avoid karo",
-            ],
+            ["Fake sites wallet drain kar sakti hain", "Malicious signatures capture ho sakte hain"],
+            ["Unknown transaction SIGN mat karo", "Token approvals revoke karo", "Unknown links avoid karo"],
+        )
+    if kind == "hack":
+        return (
+            ["Exploit/Hack detect hua — funds risk me ho sakte hain", "Protocol/contract interaction unsafe ho sakta hai"],
+            ["Protocol se interact mat karo", "Agar funds hain to withdraw try karo (if possible)", "Official updates follow karo"],
+        )
+    if kind == "scam":
+        return (
+            ["Scam/Rug signals — liquidity drain ya honeypot ka risk", "Funds loss possible"],
+            ["Token trade avoid karo", "Wallet approvals check & revoke karo", "Sirf verified sources follow karo"],
         )
 
     return (
-        [
-            "Exploit / scam signals detect hue hain",
-            "User funds risk me ho sakte hain",
-        ],
-        [
-            "Protocol se interact mat karo",
-            "Sirf official announcements follow karo",
-        ],
+        ["Suspicious activity detected", "Stay cautious"],
+        ["Unknown links/tx avoid karo", "Official updates follow karo"],
     )
 
 
 # =========================
-# FORMAT MESSAGE
+# FORMAT MESSAGE (clean + readable)
 # =========================
-def format_alert(source, title, summary, link):
-    text = normalize(f"{title} {summary}")
-    hits = detect_alert(text)
-    network = detect_network(text)
-    impact, action = impact_and_action(hits)
-    risk, todo = risk_and_todo(hits)
+def format_alert(source: str, title: str, summary: str, link: str) -> str:
+    title = normalize(title)[:120]
+    clean_summary = strip_html(summary)
 
-    context = normalize(summary)
-    if len(context) > 260:
-        context = context[:260] + "…"
+    combined_for_detect = f"{title} {clean_summary}"
+    hits = strong_hits(combined_for_detect)
+    kind = classify(hits)
+    network = detect_network(combined_for_detect)
+    impact, action = impact_and_action(kind)
+    risk, todo = risk_and_todo(kind)
+
+    # short context only (no html, no urls)
+    context = clean_summary
+    if len(context) > 380:
+        context = context[:380].rstrip() + "…"
 
     now = datetime.now(timezone.utc).strftime("%d %b %Y | %H:%M UTC")
 
     msg = (
-        f"🚨 <b>ALERT:</b> {html_escape(title)}\n"
+        f"🚨 <b>ALERT</b>\n"
+        f"🧾 <b>Title:</b> {html_escape(title)}\n"
         f"🏷️ <b>Network:</b> {html_escape(network)}\n\n"
-        f"⚠️ <b>Risk:</b>\n"
-        + "\n".join([f"• {html_escape(x)}" for x in risk])
-        + "\n\n"
-        f"🧠 <b>What to do NOW:</b>\n"
-        + "\n".join([f"• {html_escape(x)}" for x in todo])
-        + "\n\n"
+        f"⚠️ <b>Risk</b>\n" +
+        "\n".join([f"• {html_escape(x)}" for x in risk]) +
+        "\n\n"
+        f"🧠 <b>What to do NOW</b>\n" +
+        "\n".join([f"• {html_escape(x)}" for x in todo]) +
+        "\n\n"
         f"📊 <b>Impact:</b> {impact}\n"
-        f"🔥 <b>Action:</b> {action}\n\n"
-        f"🧾 <b>Context:</b> {html_escape(context)}\n\n"
+        f"🔥 <b>Action:</b> {html_escape(action)}\n\n"
+        f"🧩 <b>Context</b>\n{html_escape(context)}\n\n"
         f"🔗 <b>Source:</b> {html_escape(source)}\n"
-        f"<a href='{html_escape(link)}'>{html_escape(link)}</a>\n\n"
+        f"<a href='{html_escape(link)}'>Open Link</a>\n"
         f"🕒 <i>{now}</i>"
     )
 
@@ -170,9 +238,9 @@ def format_alert(source, title, summary, link):
 
 
 # =========================
-# SEND (ASYNC SAFE)
+# SEND (ASYNC)
 # =========================
-async def send(bot, msg):
+async def send(bot: Bot, msg: str):
     try:
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -181,9 +249,11 @@ async def send(bot, msg):
             disable_web_page_preview=DISABLE_WEB_PREVIEW,
         )
     except BadRequest:
+        # fallback plain
+        plain = re.sub(r"<[^>]+>", "", msg)
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
-            text=re.sub(r"<[^>]+>", "", msg),
+            text=plain,
             disable_web_page_preview=True,
         )
 
@@ -201,6 +271,8 @@ async def run_once():
 
     for source, url in RSS_FEEDS:
         feed = feedparser.parse(url)
+
+        # newest-first in many feeds; keep as is but stop early via MAX_POSTS_PER_RUN
         for entry in feed.entries:
             if posted >= MAX_POSTS_PER_RUN:
                 break
@@ -209,8 +281,15 @@ async def run_once():
             summary = entry.get("summary", "") or ""
             link = entry.get("link", "") or ""
 
-            hits = detect_alert(f"{title} {summary}")
+            clean_summary = strip_html(summary)
+            combined = f"{title} {clean_summary}"
+
+            hits = strong_hits(combined)
             if not hits:
+                continue
+
+            # Reduce spam from “reports/analysis” unless it still has strong keywords
+            if is_soft_report(title, clean_summary) and len(hits) < 2:
                 continue
 
             key = uid(link or title)
@@ -222,7 +301,7 @@ async def run_once():
 
             memory.add(key)
             posted += 1
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.1)
 
     save_memory(memory)
     print(f"[INFO] Posted {posted} alert(s).")
