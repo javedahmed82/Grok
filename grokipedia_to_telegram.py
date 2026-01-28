@@ -70,7 +70,7 @@ CRYPTO_CONTEXT_KEYWORDS = {
 }
 
 RISK_KEYWORDS = {
-    "scam", "rug pull", "rugpull", "ponzi", "fraud", "hack", "exploited", "exploit", "drained",
+    "scam", "rug pull", "rugpull", "ponzi", "fraud", "hack", "hacked", "exploited", "exploit", "drained",
     "phishing", "malware", "laundering", "indictment", "charged", "sec", "lawsuit",
     "sanction", "shutdown", "exit scam", "frozen", "seized", "arrested", "bankrupt"
 }
@@ -108,12 +108,6 @@ def normalize_ws(text: str) -> str:
     return " ".join((text or "").split())
 
 def strip_markup(text: str) -> str:
-    """
-    Grokipedia content can contain:
-    - HTML comments <!--infobox ... -->
-    - internal links [Text](/page/X)
-    - markdown links [Text](https://...)
-    """
     t = text or ""
     t = re.sub(r"<!--.*?-->", "", t, flags=re.DOTALL)
     t = re.sub(r"\[([^\]]+)\]\(/page/[^\)]+\)", r"\1", t)
@@ -123,16 +117,13 @@ def strip_markup(text: str) -> str:
 
 def split_sentences(text: str):
     parts = re.split(r"(?<=[.!?])\s+", text or "")
-    parts = [p.strip() for p in parts if p.strip()]
-    return parts
+    return [p.strip() for p in parts if p.strip()]
 
 def safe_html(s: str) -> str:
     return html_escape(s or "")
 
 def clamp(s: str, n: int) -> str:
-    if len(s) <= n:
-        return s
-    return s[: max(0, n - 1)] + "…"
+    return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
 
 
 # -----------------------------
@@ -207,11 +198,9 @@ def heuristic_short_summary(cleaned: str) -> str:
     sents = split_sentences(cleaned)
     if not sents:
         return ""
-    s1 = sents[0]
-    s2 = sents[1] if len(sents) > 1 else ""
-    out = s1
-    if s2 and len(out) < 140:
-        out = out + " " + s2
+    out = sents[0]
+    if len(sents) > 1 and len(out) < 140:
+        out = out + " " + sents[1]
     return clamp(out, 240)
 
 def ai_summarize_short(title: str, content: str) -> str:
@@ -227,23 +216,16 @@ def ai_summarize_short(title: str, content: str) -> str:
 
         prompt = (
             "You are a crypto news editor. Produce a short summary in 2-3 lines.\n"
-            "Rules:\n"
-            "- No markdown.\n"
-            "- No URLs.\n"
-            "- Keep it concise and news-like.\n\n"
-            f"Title: {title}\n"
-            f"Article: {cleaned[:4000]}"
+            "Rules:\n- No markdown.\n- No URLs.\n- Concise, news-like.\n\n"
+            f"Title: {title}\nArticle: {cleaned[:4000]}"
         )
 
         try:
-            headers = {
-                "Authorization": f"Bearer {AI_API_KEY}",
-                "Content-Type": "application/json"
-            }
+            headers = {"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"}
             payload = {
                 "model": AI_MODEL,
                 "messages": [
-                    {"role": "system", "content": "You summarize text for Telegram crypto news."},
+                    {"role": "system", "content": "Summarize for Telegram crypto news."},
                     {"role": "user", "content": prompt}
                 ],
                 "temperature": 0.3,
@@ -282,7 +264,6 @@ def build_news_sections(content: str):
             bullets.append(s)
         if len(bullets) >= 6:
             break
-
     if not bullets:
         bullets = [normalize_ws(s) for s in sents[3:7]][:5]
 
@@ -290,21 +271,24 @@ def build_news_sections(content: str):
 
 
 # -----------------------------
-# IMAGE PICK
+# IMAGE LOGIC (FIXED)
 # -----------------------------
-def pick_image_url(citations):
-    if not citations:
-        return None
-    preferred_domains = [
-        "reuters.com", "coindesk.com", "cointelegraph.com", "theblock.co",
-        "time.com", "businessinsider.com", "bloomberg.com", "wsj.com",
-        "okx.com", "binance.com", "coinbase.com"
-    ]
-    for c in citations:
-        u = (c.get("url") or "").strip()
-        if any(d in u for d in preferred_domains):
-            return u
-    return (citations[0].get("url") or "").strip() or None
+def is_direct_image_url(url: str) -> bool:
+    if not url:
+        return False
+    u = url.lower().split("?")[0]
+    return u.endswith(".jpg") or u.endswith(".jpeg") or u.endswith(".png") or u.endswith(".webp")
+
+def pick_direct_image_from_page_metadata(page_obj: dict) -> str | None:
+    """
+    If Grokipedia ever includes an image field (unknown), try it safely.
+    """
+    p = (page_obj or {}).get("page") or {}
+    for key in ["image", "image_url", "thumbnail", "thumbnail_url", "cover", "cover_image"]:
+        v = (p.get(key) or "").strip()
+        if v and is_direct_image_url(v):
+            return v
+    return None
 
 
 # -----------------------------
@@ -366,7 +350,7 @@ def format_post(title: str, slug: str, content: str, citations: list, topic: str
 
 
 # -----------------------------
-# PHOTO CAPTION SPLIT (FIX)
+# PHOTO CAPTION SPLIT
 # -----------------------------
 def split_for_photo_and_text(full_html: str) -> tuple[str, str]:
     if not full_html:
@@ -383,21 +367,25 @@ def split_for_photo_and_text(full_html: str) -> tuple[str, str]:
 
 
 # -----------------------------
-# SAFE SEND (PHOTO + LONG MESSAGE)
+# SAFE SEND (NO WEBPAGE AS PHOTO!)
 # -----------------------------
-async def safe_send(bot: Bot, text: str, image_url: str | None):
+async def safe_send(bot: Bot, text: str, direct_image_url: str | None):
+    """
+    If direct_image_url is a real image:
+      send_photo with short caption + long message after
+    Else:
+      send_message only with web page preview enabled (Telegram will show link previews)
+    """
     caption_html, long_html = split_for_photo_and_text(text)
 
     try:
-        if image_url:
-            # 1) Photo with short caption
+        if direct_image_url and is_direct_image_url(direct_image_url):
             await bot.send_photo(
                 chat_id=CHAT_ID,
-                photo=image_url,
+                photo=direct_image_url,
                 caption=caption_html,
                 parse_mode="HTML",
             )
-            # 2) Full long post as separate message
             if long_html:
                 await bot.send_message(
                     chat_id=CHAT_ID,
@@ -420,9 +408,9 @@ async def safe_send(bot: Bot, text: str, image_url: str | None):
         plain = re.sub(r"<[^>]+>", "", plain)
         plain = clamp(plain, TG_MAX)
 
-        if image_url:
+        if direct_image_url and is_direct_image_url(direct_image_url):
             cap_plain = clamp(plain, PHOTO_CAPTION_MAX)
-            await bot.send_photo(chat_id=CHAT_ID, photo=image_url, caption=cap_plain)
+            await bot.send_photo(chat_id=CHAT_ID, photo=direct_image_url, caption=cap_plain)
             if len(plain) > PHOTO_CAPTION_MAX:
                 await bot.send_message(chat_id=CHAT_ID, text=plain, disable_web_page_preview=False)
         else:
@@ -475,9 +463,11 @@ async def run_cycle():
                 continue
 
             msg = format_post(title, slug, content, citations, topic)
-            image_url = pick_image_url(citations)
 
-            await safe_send(bot, msg, image_url=image_url)
+            # IMPORTANT: only attach photo if we have a direct image URL
+            direct_img = pick_direct_image_from_page_metadata(page)
+
+            await safe_send(bot, msg, direct_image_url=direct_img)
 
             memory.add(key)
             save_memory(memory)
